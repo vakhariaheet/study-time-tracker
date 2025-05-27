@@ -20,6 +20,7 @@ export function Settings() {
   const [notifications, setNotifications] = useState(true)
   const [pomodoroLength, setPomodoroLength] = useState("25")
   const [breakLength, setBreakLength] = useState("5")
+  const [isLoading, setIsLoading] = useState(false)
 
   const formatTime = (seconds: number) => {
     const hours = Math.floor(seconds / 3600)
@@ -30,41 +31,62 @@ export function Settings() {
     return `${minutes}m`
   }
 
-  const handleSetDailyGoal = () => {
+  const handleSetDailyGoal = async () => {
     if (dailyGoal) {
       const minutes = Number.parseInt(dailyGoal)
       if (minutes > 0) {
-        setGoal({
-          type: "daily",
-          target: minutes * 60, // Convert to seconds
-        })
-        setDailyGoal("")
+        setIsLoading(true)
+        try {
+          await setGoal({
+            type: "daily",
+            target: minutes * 60, // Convert to seconds
+          })
+          setDailyGoal("")
+        } catch (error) {
+          console.error("Error setting daily goal:", error)
+        } finally {
+          setIsLoading(false)
+        }
       }
     }
   }
 
-  const handleSetWeeklyGoal = () => {
+  const handleSetWeeklyGoal = async () => {
     if (weeklyGoal) {
       const hours = Number.parseInt(weeklyGoal)
       if (hours > 0) {
-        setGoal({
-          type: "weekly",
-          target: hours * 3600, // Convert to seconds
-        })
-        setWeeklyGoal("")
+        setIsLoading(true)
+        try {
+          await setGoal({
+            type: "weekly",
+            target: hours * 3600, // Convert to seconds
+          })
+          setWeeklyGoal("")
+        } catch (error) {
+          console.error("Error setting weekly goal:", error)
+        } finally {
+          setIsLoading(false)
+        }
       }
     }
   }
 
-  const handleSetMonthlyGoal = () => {
+  const handleSetMonthlyGoal = async () => {
     if (monthlyGoal) {
       const hours = Number.parseInt(monthlyGoal)
       if (hours > 0) {
-        setGoal({
-          type: "monthly",
-          target: hours * 3600, // Convert to seconds
-        })
-        setMonthlyGoal("")
+        setIsLoading(true)
+        try {
+          await setGoal({
+            type: "monthly",
+            target: hours * 3600, // Convert to seconds
+          })
+          setMonthlyGoal("")
+        } catch (error) {
+          console.error("Error setting monthly goal:", error)
+        } finally {
+          setIsLoading(false)
+        }
       }
     }
   }
@@ -90,6 +112,8 @@ export function Settings() {
 
   const clearAllData = () => {
     if (confirm("Are you sure you want to clear all data? This action cannot be undone.")) {
+      // Note: In a real app, you'd want to implement a proper data clearing function
+      // that removes data from Supabase as well
       localStorage.clear()
       window.location.reload()
     }
@@ -134,7 +158,7 @@ export function Settings() {
                     onChange={(e) => setDailyGoal(e.target.value)}
                     type="number"
                   />
-                  <Button onClick={handleSetDailyGoal} size="sm">
+                  <Button onClick={handleSetDailyGoal} size="sm" disabled={isLoading}>
                     Set
                   </Button>
                 </div>
@@ -154,7 +178,7 @@ export function Settings() {
                     onChange={(e) => setWeeklyGoal(e.target.value)}
                     type="number"
                   />
-                  <Button onClick={handleSetWeeklyGoal} size="sm">
+                  <Button onClick={handleSetWeeklyGoal} size="sm" disabled={isLoading}>
                     Set
                   </Button>
                 </div>
@@ -174,7 +198,7 @@ export function Settings() {
                     onChange={(e) => setMonthlyGoal(e.target.value)}
                     type="number"
                   />
-                  <Button onClick={handleSetMonthlyGoal} size="sm">
+                  <Button onClick={handleSetMonthlyGoal} size="sm" disabled={isLoading}>
                     Set
                   </Button>
                 </div>

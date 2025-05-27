@@ -345,6 +345,20 @@ export function StudyProvider({ children }: { children: React.ReactNode }) {
     }
 
     try {
+      if (endedSession.type === "wasted") {
+        // Track wasted time in separate table
+        const { error: wastedError } = await supabase.rpc('track_wasted_time', {
+          p_user_id: user.id,
+          p_duration: endedSession.duration,
+          p_start_time: endedSession.startTime.toISOString(),
+          p_end_time: endedSession.endTime.toISOString(),
+          p_notes: endedSession.notes
+        })
+
+        if (wastedError) throw wastedError
+      }
+
+      // Still record in study_sessions for historical tracking
       const { error } = await supabase
         .from('study_sessions')
         .insert({
