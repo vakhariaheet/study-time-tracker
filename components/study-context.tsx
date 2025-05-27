@@ -4,6 +4,9 @@ import type React from "react"
 import { createContext, useContext, useEffect, useState } from "react"
 import { supabase } from "@/lib/supabase"
 import type { User } from "@supabase/supabase-js"
+import type { Database } from "@/lib/database.types"
+
+type Tables = Database['public']['Tables']
 
 // Add a new session type to the StudySession interface
 export interface StudySession {
@@ -15,7 +18,7 @@ export interface StudySession {
   duration: number
   notes?: string
   tags: string[]
-  type: "focus" | "break" | "manual" | "wasted" // Add "wasted" type
+  type: "focus" | "break" | "manual" | "wasted"
 }
 
 export interface Subject {
@@ -42,7 +45,6 @@ export interface StudyGoal {
   subjectId?: string
 }
 
-// Add wasted time tracking to the context interface
 interface StudyContextType {
   subjects: Subject[]
   sessions: StudySession[]
@@ -52,19 +54,19 @@ interface StudyContextType {
   timerTime: number
   isBreakTime: boolean
   isZenMode: boolean
-  isWastedTime: boolean // Add this
-  addSubject: (subject: Omit<Subject, "id" | "totalTime">) => void
-  updateSubject: (id: string, updates: Partial<Subject>) => void
-  deleteSubject: (id: string) => void
-  addTopic: (subjectId: string, topic: Omit<Topic, "id" | "totalTime" | "progress">) => void
+  isWastedTime: boolean
+  addSubject: (subject: Omit<Subject, "id" | "totalTime">) => Promise<void>
+  updateSubject: (id: string, updates: Partial<Subject>) => Promise<void>
+  deleteSubject: (id: string) => Promise<void>
+  addTopic: (subjectId: string, topic: Omit<Topic, "id" | "totalTime" | "progress">) => Promise<void>
   startSession: (subjectId: string, topicId?: string) => void
-  startWastedTimeSession: () => void // Add this
+  startWastedTimeSession: () => void
   pauseSession: () => void
   resumeSession: () => void
-  stopSession: (notes?: string) => void
-  addManualSession: (session: Omit<StudySession, "id">) => void
-  setGoal: (goal: Omit<StudyGoal, "id" | "current">) => void
-  updateGoal: (id: string, updates: Partial<StudyGoal>) => void
+  stopSession: (notes?: string) => Promise<void>
+  addManualSession: (session: Omit<StudySession, "id">) => Promise<void>
+  setGoal: (goal: Omit<StudyGoal, "id" | "current">) => Promise<void>
+  updateGoal: (id: string, updates: Partial<StudyGoal>) => Promise<void>
   toggleZenMode: () => void
   user: User | null
   isLoading: boolean
@@ -82,34 +84,38 @@ export function StudyProvider({ children }: { children: React.ReactNode }) {
   const [timerTime, setTimerTime] = useState(0)
   const [isBreakTime, setIsBreakTime] = useState(false)
   const [isZenMode, setIsZenMode] = useState(false)
-  // Add isWastedTime state
   const [isWastedTime, setIsWastedTime] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const [isAuthLoading, setIsAuthLoading] = useState(true)
 
-  // Load data from localStorage on mount
+  // Auth effect
   useEffect(() => {
-    const savedSubjects = localStorage.getItem("study-subjects")
-    const savedSessions = localStorage.getItem("study-sessions")
-    const savedGoals = localStorage.getItem("study-goals")
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null)
+      setIsAuthLoading(false)
+    })
 
-    if (savedSubjects) setSubjects(JSON.parse(savedSubjects))
-    if (savedSessions) setSessions(JSON.parse(savedSessions))
-    if (savedGoals) setGoals(JSON.parse(savedGoals))
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null)
+      setIsAuthLoading(false)
+    })
+
+    return () => subscription.unsubscribe()
   }, [])
 
-  // Save data to localStorage when state changes
+  // Load data when user changes
   useEffect(() => {
-    localStorage.setItem("study-subjects", JSON.stringify(subjects))
-  }, [subjects])
-
-  useEffect(() => {
-    localStorage.setItem("study-sessions", JSON.stringify(sessions))
-  }, [sessions])
-
-  useEffect(() => {
-    localStorage.setItem("study-goals", JSON.stringify(goals))
-  }, [goals])
+    if (user) {
+      loadUserData()
+    } else {
+      // Clear data when user logs out
+      setSubjects([])
+      setSessions([])
+      setGoals([])
+    }
+  }, [user])
 
   // Timer effect
   useEffect(() => {
@@ -122,57 +128,170 @@ export function StudyProvider({ children }: { children: React.ReactNode }) {
     return () => clearInterval(interval)
   }, [isTimerRunning])
 
-  // Auth effect
-  useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null)
-      setIsAuthLoading(false)
-    })
+  const loadUserData = async () => {
+    if (!user) return
 
-    // Listen for auth changes
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null)
-      setIsAuthLoading(false)
-    })
+    try {
+      // Load subjects with topics
+      const { data: subjectsData, error: subjectsError } = await supabase
+        .from('subjects')
+        .select('*, topics(*)')
+        .eq('user_id', user.id)
 
-    return () => subscription.unsubscribe()
-  }, [])
+      if (subjectsError) throw subjectsError
 
-  const signOut = async () => {
-    await supabase.auth.signOut()
+      // Load sessions
+      const { data: sessionsData, error: sessionsError } = await supabase
+        .from('study_sessions')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('start_time', { ascending: false })
+
+      if (sessionsError) throw sessionsError
+
+      // Load goals
+      const { data: goalsData, error: goalsError } = await supabase
+        .from('goals')
+        .select('*')
+        .eq('user_id', user.id)
+
+      if (goalsError) throw goalsError
+
+      // Transform data to match our interfaces
+      setSubjects(subjectsData.map(subject => ({
+        id: subject.id,
+        name: subject.name,
+        color: subject.color,
+        totalTime: subject.total_time,
+        goalTime: subject.goal_time,
+        topics: subject.topics.map((topic: Tables['topics']['Row']) => ({
+          id: topic.id,
+          name: topic.name,
+          totalTime: topic.total_time,
+          progress: topic.progress
+        }))
+      })))
+
+      setSessions(sessionsData.map(session => ({
+        id: session.id,
+        subjectId: session.subject_id,
+        topicId: session.topic_id,
+        startTime: new Date(session.start_time),
+        endTime: session.end_time ? new Date(session.end_time) : undefined,
+        duration: session.duration,
+        notes: session.notes,
+        tags: session.tags,
+        type: session.type
+      })))
+
+      setGoals(goalsData.map(goal => ({
+        id: goal.id,
+        type: goal.type,
+        target: goal.target,
+        current: goal.current,
+        subjectId: goal.subject_id
+      })))
+    } catch (error) {
+      console.error('Error loading user data:', error)
+    }
   }
 
-  const addSubject = (subject: Omit<Subject, "id" | "totalTime">) => {
+  const addSubject = async (subject: Omit<Subject, "id" | "totalTime">) => {
+    if (!user) return
+
+    const { data, error } = await supabase
+      .from('subjects')
+      .insert({
+        user_id: user.id,
+        name: subject.name,
+        color: subject.color,
+        total_time: 0
+      })
+      .select('*, topics(*)')
+      .single()
+
+    if (error) throw error
+
     const newSubject: Subject = {
-      ...subject,
-      id: Date.now().toString(),
-      totalTime: 0,
+      id: data.id,
+      name: data.name,
+      color: data.color,
+      totalTime: data.total_time,
+      topics: []
     }
-    setSubjects((prev) => [...prev, newSubject])
+
+    setSubjects(prev => [...prev, newSubject])
   }
 
-  const updateSubject = (id: string, updates: Partial<Subject>) => {
-    setSubjects((prev) => prev.map((subject) => (subject.id === id ? { ...subject, ...updates } : subject)))
+  const updateSubject = async (id: string, updates: Partial<Subject>) => {
+    if (!user) return
+
+    const { error } = await supabase
+      .from('subjects')
+      .update({
+        name: updates.name,
+        color: updates.color,
+        total_time: updates.totalTime,
+        goal_time: updates.goalTime
+      })
+      .eq('id', id)
+      .eq('user_id', user.id)
+
+    if (error) throw error
+
+    setSubjects(prev =>
+      prev.map(subject =>
+        subject.id === id ? { ...subject, ...updates } : subject
+      )
+    )
   }
 
-  const deleteSubject = (id: string) => {
-    setSubjects((prev) => prev.filter((subject) => subject.id !== id))
+  const deleteSubject = async (id: string) => {
+    if (!user) return
+
+    const { error } = await supabase
+      .from('subjects')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', user.id)
+
+    if (error) throw error
+
+    setSubjects(prev => prev.filter(subject => subject.id !== id))
   }
 
-  const addTopic = (subjectId: string, topic: Omit<Topic, "id" | "totalTime" | "progress">) => {
+  const addTopic = async (
+    subjectId: string,
+    topic: Omit<Topic, "id" | "totalTime" | "progress">
+  ) => {
+    if (!user) return
+
+    const { data, error } = await supabase
+      .from('topics')
+      .insert({
+        subject_id: subjectId,
+        name: topic.name,
+        total_time: 0,
+        progress: 0
+      })
+      .select()
+      .single()
+
+    if (error) throw error
+
     const newTopic: Topic = {
-      ...topic,
-      id: Date.now().toString(),
-      totalTime: 0,
-      progress: 0,
+      id: data.id,
+      name: data.name,
+      totalTime: data.total_time,
+      progress: data.progress
     }
-    setSubjects((prev) =>
-      prev.map((subject) =>
-        subject.id === subjectId ? { ...subject, topics: [...subject.topics, newTopic] } : subject,
-      ),
+
+    setSubjects(prev =>
+      prev.map(subject =>
+        subject.id === subjectId
+          ? { ...subject, topics: [...subject.topics, newTopic] }
+          : subject
+      )
     )
   }
 
@@ -189,13 +308,13 @@ export function StudyProvider({ children }: { children: React.ReactNode }) {
     setCurrentSession(session)
     setIsTimerRunning(true)
     setTimerTime(0)
+    setIsWastedTime(false)
   }
 
-  // Add the startWastedTimeSession function
   const startWastedTimeSession = () => {
     const session: StudySession = {
       id: Date.now().toString(),
-      subjectId: "wasted-time", // Special ID for wasted time
+      subjectId: "wasted-time",
       startTime: new Date(),
       duration: 0,
       tags: [],
@@ -215,46 +334,66 @@ export function StudyProvider({ children }: { children: React.ReactNode }) {
     setIsTimerRunning(true)
   }
 
-  // Update the stopSession function to handle wasted time
-  const stopSession = (notes?: string) => {
-    if (currentSession) {
-      const endedSession: StudySession = {
-        ...currentSession,
-        endTime: new Date(),
-        duration: timerTime,
-        notes,
-      }
+  const stopSession = async (notes?: string) => {
+    if (!currentSession || !user) return
 
-      setSessions((prev) => [...prev, endedSession])
+    const endedSession: StudySession = {
+      ...currentSession,
+      endTime: new Date(),
+      duration: timerTime,
+      notes,
+    }
 
-      // Only update subject total time if it's not wasted time
-      if (currentSession.type !== "wasted") {
-        setSubjects((prev) =>
-          prev.map((subject) =>
-            subject.id === currentSession.subjectId
-              ? { ...subject, totalTime: subject.totalTime + timerTime }
-              : subject,
-          ),
-        )
+    try {
+      const { error } = await supabase
+        .from('study_sessions')
+        .insert({
+          user_id: user.id,
+          subject_id: endedSession.subjectId,
+          topic_id: endedSession.topicId,
+          start_time: endedSession.startTime.toISOString(),
+          end_time: endedSession.endTime.toISOString(),
+          duration: endedSession.duration,
+          type: endedSession.type,
+          notes: endedSession.notes,
+          tags: endedSession.tags
+        })
+
+      if (error) throw error
+
+      // Update subject total time if it's not wasted time
+      if (endedSession.type !== "wasted") {
+        const { error: updateError } = await supabase.rpc('increment_subject_time', {
+          p_subject_id: endedSession.subjectId,
+          p_duration: endedSession.duration
+        })
+
+        if (updateError) throw updateError
 
         // Update topic total time if applicable
-        if (currentSession.topicId) {
-          setSubjects((prev) =>
-            prev.map((subject) =>
-              subject.id === currentSession.subjectId
-                ? {
-                    ...subject,
-                    topics: subject.topics.map((topic) =>
-                      topic.id === currentSession.topicId
-                        ? { ...topic, totalTime: topic.totalTime + timerTime }
-                        : topic,
-                    ),
-                  }
-                : subject,
-            ),
-          )
+        if (endedSession.topicId) {
+          const { error: topicError } = await supabase.rpc('increment_topic_time', {
+            p_topic_id: endedSession.topicId,
+            p_duration: endedSession.duration
+          })
+
+          if (topicError) throw topicError
         }
       }
+
+      setSessions(prev => [endedSession, ...prev])
+
+      if (endedSession.type !== "wasted") {
+        setSubjects(prev =>
+          prev.map(subject =>
+            subject.id === endedSession.subjectId
+              ? { ...subject, totalTime: subject.totalTime + endedSession.duration }
+              : subject
+          )
+        )
+      }
+    } catch (error) {
+      console.error('Error saving session:', error)
     }
 
     setCurrentSession(null)
@@ -263,39 +402,121 @@ export function StudyProvider({ children }: { children: React.ReactNode }) {
     setIsWastedTime(false)
   }
 
-  const addManualSession = (session: Omit<StudySession, "id">) => {
-    const newSession: StudySession = {
-      ...session,
-      id: Date.now().toString(),
-    }
-    setSessions((prev) => [...prev, newSession])
+  const addManualSession = async (session: Omit<StudySession, "id">) => {
+    if (!user) return
 
-    // Update subject total time
-    setSubjects((prev) =>
-      prev.map((subject) =>
-        subject.id === session.subjectId ? { ...subject, totalTime: subject.totalTime + session.duration } : subject,
-      ),
+    try {
+      const { data, error } = await supabase
+        .from('study_sessions')
+        .insert({
+          user_id: user.id,
+          subject_id: session.subjectId,
+          topic_id: session.topicId,
+          start_time: session.startTime.toISOString(),
+          end_time: session.endTime?.toISOString(),
+          duration: session.duration,
+          type: session.type,
+          notes: session.notes,
+          tags: session.tags
+        })
+        .select()
+        .single()
+
+      if (error) throw error
+
+      const newSession: StudySession = {
+        id: data.id,
+        subjectId: data.subject_id,
+        topicId: data.topic_id,
+        startTime: new Date(data.start_time),
+        endTime: data.end_time ? new Date(data.end_time) : undefined,
+        duration: data.duration,
+        notes: data.notes,
+        tags: data.tags,
+        type: data.type
+      }
+
+      setSessions(prev => [newSession, ...prev])
+
+      // Update subject total time
+      if (session.type !== "wasted") {
+        const { error: updateError } = await supabase.rpc('increment_subject_time', {
+          p_subject_id: session.subjectId,
+          p_duration: session.duration
+        })
+
+        if (updateError) throw updateError
+
+        setSubjects(prev =>
+          prev.map(subject =>
+            subject.id === session.subjectId
+              ? { ...subject, totalTime: subject.totalTime + session.duration }
+              : subject
+          )
+        )
+      }
+    } catch (error) {
+      console.error('Error adding manual session:', error)
+    }
+  }
+
+  const setGoal = async (goal: Omit<StudyGoal, "id" | "current">) => {
+    if (!user) return
+
+    const { data, error } = await supabase
+      .from('goals')
+      .insert({
+        user_id: user.id,
+        type: goal.type,
+        target: goal.target,
+        current: 0,
+        subject_id: goal.subjectId
+      })
+      .select()
+      .single()
+
+    if (error) throw error
+
+    const newGoal: StudyGoal = {
+      id: data.id,
+      type: data.type,
+      target: data.target,
+      current: data.current,
+      subjectId: data.subject_id
+    }
+
+    setGoals(prev => [...prev, newGoal])
+  }
+
+  const updateGoal = async (id: string, updates: Partial<StudyGoal>) => {
+    if (!user) return
+
+    const { error } = await supabase
+      .from('goals')
+      .update({
+        type: updates.type,
+        target: updates.target,
+        current: updates.current,
+        subject_id: updates.subjectId
+      })
+      .eq('id', id)
+      .eq('user_id', user.id)
+
+    if (error) throw error
+
+    setGoals(prev =>
+      prev.map(goal => (goal.id === id ? { ...goal, ...updates } : goal))
     )
   }
 
-  const setGoal = (goal: Omit<StudyGoal, "id" | "current">) => {
-    const newGoal: StudyGoal = {
-      ...goal,
-      id: Date.now().toString(),
-      current: 0,
-    }
-    setGoals((prev) => [...prev, newGoal])
-  }
-
-  const updateGoal = (id: string, updates: Partial<StudyGoal>) => {
-    setGoals((prev) => prev.map((goal) => (goal.id === id ? { ...goal, ...updates } : goal)))
-  }
-
   const toggleZenMode = () => {
-    setIsZenMode((prev) => !prev)
+    setIsZenMode(prev => !prev)
   }
 
-  // Add isWastedTime and startWastedTimeSession to the context value
+  const signOut = async () => {
+    await supabase.auth.signOut()
+  }
+
   return (
     <StudyContext.Provider
       value={{
